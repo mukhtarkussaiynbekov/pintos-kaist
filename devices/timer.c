@@ -29,6 +29,26 @@ static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 
+struct list thread_list;
+struct sleep_thread {
+	struct list_elem elem;
+	struct thread* blocked_thread;
+	int64_t wake_ticks;
+};
+
+// Referenced tests/internal/list.c
+/* Returns true if value A is less than value B, false
+   otherwise. */
+static bool
+value_less (const struct list_elem *a_, const struct list_elem *b_,
+            void *aux UNUSED) 
+{
+  const struct sleep_thread *a = list_entry (a_, struct sleep_thread, elem);
+  const struct sleep_thread *b = list_entry (b_, struct sleep_thread, elem);
+  
+  return a->wake_ticks < b->wake_ticks;
+}
+
 /* Sets up the 8254 Programmable Interval Timer (PIT) to
    interrupt PIT_FREQ times per second, and registers the
    corresponding interrupt. */
@@ -43,6 +63,8 @@ timer_init (void) {
 	outb (0x40, count >> 8);
 
 	intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+
+	list_init (&thread_list); // initialize sleep list
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -93,8 +115,20 @@ timer_sleep (int64_t ticks) {
 	int64_t start = timer_ticks ();
 
 	ASSERT (intr_get_level () == INTR_ON);
-	while (timer_elapsed (start) < ticks)
-		thread_yield ();
+
+	// Need to keep track of thread that is being put into sleep
+	// and when to wake the thread up
+	struct sleep_thread sleep_elem;
+	struct sleep_thread* sleep_elem_ptr = &sleep_elem;
+
+	sleep_elem_ptr->blocked_thread = thread_current ();
+	sleep_elem_ptr->wake_ticks = start + ticks;
+
+	// Insert sleep element to sleep list with synchronization in mind
+	enum intr_level old_level = intr_disable ();
+	list_insert_ordered (&thread_list, &sleep_elem_ptr->elem, value_less, NULL);
+	thread_block(); // actually make thread sleep
+	intr_set_level (old_level);
 }
 
 /* Suspends execution for approximately MS milliseconds. */
@@ -126,6 +160,28 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED) {
 	ticks++;
 	thread_tick ();
+
+	struct list_elem* next;
+	struct list_elem* cur;
+	struct sleep_thread* sleep_elem_ptr;
+
+	// Remove elements from sleep list with synchronization in mind
+	enum intr_level old_level = intr_disable ();
+	for (cur = list_begin (&thread_list); cur != list_end (&thread_list); cur = next) {
+		// store next pointer as cur might be removed from the sleep list
+		next = list_next (cur);
+
+		sleep_elem_ptr = list_entry (cur, struct sleep_thread, elem);
+		if (sleep_elem_ptr->wake_ticks <= ticks) {
+			list_remove (cur);
+			thread_unblock (sleep_elem_ptr->blocked_thread);
+		} else {
+			// since sleep elements are sorted with respect to wake_ticks,
+			// remaining wake_ticks are greater than current ticks
+			break;
+		}
+	}
+	intr_set_level (old_level);
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
