@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/interrupt.h"
+#include "threads/synch.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -27,6 +28,8 @@ typedef int tid_t;
 #define PRI_MIN 0                       /* Lowest priority. */
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
+#define PRI_DONATION_DEPTH 8			/* Depth of nested priority donation. */
+#define PRI_LOWEST_DEPTH 0				/* Depth at which initial donation happens. */
 
 /* A kernel thread or user process.
  *
@@ -91,6 +94,9 @@ struct thread {
 	enum thread_status status;          /* Thread state. */
 	char name[16];                      /* Name (for debugging purposes). */
 	int priority;                       /* Priority. */
+	int priority_initial;				/* Initial priority. */
+	struct list locks_acquired;			/* Locks acquired by the thread. */
+	struct lock *blocking_lock;			/* Lock for which the thread is waiting to acquire. */
 
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
@@ -135,6 +141,10 @@ void thread_yield (void);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+bool priority_less (const struct list_elem *a_, const struct list_elem *b_, void *aux UNUSED);
+
+void thread_set_blocking_lock (struct lock *);
+struct list *thread_get_locks_acquired (void);
 
 int thread_get_nice (void);
 void thread_set_nice (int);

@@ -63,6 +63,31 @@ static void do_schedule(int status);
 static void schedule (void);
 static tid_t allocate_tid (void);
 
+// Referenced tests/internal/list.c
+/* Returns true if value A is less than value B, false
+   otherwise. */
+bool
+priority_less (const struct list_elem *a_, const struct list_elem *b_,
+            void *aux UNUSED) 
+{
+  const struct thread *a = list_entry (a_, struct thread, elem);
+  const struct thread *b = list_entry (b_, struct thread, elem);
+  
+  return a->priority < b->priority;
+}
+
+struct list_elem *highest_priority_ready_thread(void) {
+	return list_max (&ready_list, priority_less, NULL);
+}
+
+void print_ready_list () {
+	struct thread *cur_thread;
+	for (struct list_elem *cur = list_begin (&ready_list); cur != list_end (&ready_list); cur = list_next (cur)) {
+		cur_thread = list_entry (cur, struct thread, elem);
+		printf ("ready thread %s has %d priority\n", cur_thread->name, cur_thread->priority);
+	}
+}
+
 /* Returns true if T appears to point to a valid thread. */
 #define is_thread(t) ((t) != NULL && (t)->magic == THREAD_MAGIC)
 
@@ -207,6 +232,10 @@ thread_create (const char *name, int priority,
 	/* Add to run queue. */
 	thread_unblock (t);
 
+	if (priority > thread_get_priority ()) {
+		thread_yield ();
+	}
+
 	return tid;
 }
 
@@ -242,7 +271,7 @@ thread_unblock (struct thread *t) {
 	ASSERT (t->status == THREAD_BLOCKED);
 	list_push_back (&ready_list, &t->elem);
 	t->status = THREAD_READY;
-	intr_set_level (old_level);
+	intr_set_level (old_level);	
 }
 
 /* Returns the name of the running thread. */
@@ -311,13 +340,30 @@ thread_yield (void) {
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->priority = new_priority;
+	enum intr_level old_level = intr_disable ();
+	int max_lock_waiting_priority = get_max_lock_waiting_priority ();
+	thread_current ()->priority_initial = new_priority;
+	thread_current ()->priority = new_priority > max_lock_waiting_priority ? new_priority : max_lock_waiting_priority;
+	intr_set_level (old_level);
+	
+	if (!list_empty (&ready_list) && list_entry (highest_priority_ready_thread (), struct thread, elem)->priority > thread_current ()->priority)
+		thread_yield ();
 }
 
 /* Returns the current thread's priority. */
 int
 thread_get_priority (void) {
 	return thread_current ()->priority;
+}
+
+/* Sets the current thread's blocking lock to LOCK. */
+void thread_set_blocking_lock (struct lock *lock) {
+	thread_current ()->blocking_lock = lock;
+}
+
+/* Returns the current thread's locks acquired. */
+struct list *thread_get_locks_acquired (void) {
+	return &thread_current ()->locks_acquired;
 }
 
 /* Sets the current thread's nice value to NICE. */
@@ -408,6 +454,8 @@ init_thread (struct thread *t, const char *name, int priority) {
 	strlcpy (t->name, name, sizeof t->name);
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
+	t->priority_initial = priority;
+	list_init (&t->locks_acquired);
 	t->magic = THREAD_MAGIC;
 }
 
@@ -420,8 +468,9 @@ static struct thread *
 next_thread_to_run (void) {
 	if (list_empty (&ready_list))
 		return idle_thread;
-	else
-		return list_entry (list_pop_front (&ready_list), struct thread, elem);
+	struct list_elem *next_thread_elem = highest_priority_ready_thread ();
+	list_remove (next_thread_elem);
+	return list_entry (next_thread_elem, struct thread, elem);
 }
 
 /* Use iretq to launch the thread */
