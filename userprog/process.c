@@ -23,7 +23,7 @@
 #endif
 
 static void process_cleanup (void);
-static bool load (const char *file_name, struct intr_frame *if_);
+static bool load (const char *file_name, char *args, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
 
@@ -176,11 +176,19 @@ process_exec (void *f_name) {
 	/* We first kill the current context */
 	process_cleanup ();
 
+	/* Second, we separate file name and arguments */
+	if (strlen (file_name) >= PGSIZE) {
+		// Impose limit on length of command line arguments
+		return -1;
+	}
+	char *file_title, *args;
+	file_title = strtok_r (file_name, " ", &args); // argv[0]
+
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	success = load (file_title, args, &_if); // args == argv[1~argc-1]
 
 	/* If load failed, quit. */
-	palloc_free_page (file_name);
+	palloc_free_page (file_title);
 	if (!success)
 		return -1;
 
@@ -321,7 +329,7 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
  * and its initial stack pointer into *RSP.
  * Returns true if successful, false otherwise. */
 static bool
-load (const char *file_name, struct intr_frame *if_) {
+load (const char *file_name, char *args, struct intr_frame *if_) {
 	struct thread *t = thread_current ();
 	struct ELF ehdr;
 	struct file *file = NULL;
@@ -414,8 +422,58 @@ load (const char *file_name, struct intr_frame *if_) {
 	/* Start address. */
 	if_->rip = ehdr.e_entry;
 
-	/* TODO: Your code goes here.
-	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+	/* Implement argument passing (see project2/argument_passing.html). */
+	uintptr_t end_of_args = if_->rsp; // mark the end of argv
+	uint64_t argc = 1; // we at least have argv[0] file name
+	size_t args_length = strlen (args);
+	size_t arg_size;
+	char *arg, *save_ptr;
+	bool passed_arg = false;
+	save_ptr = args; // args == argv[1~argc-1]
+
+	// push argv[1~argc-1]
+	for (save_ptr = args + args_length; save_ptr >= args; save_ptr--) {
+		if (save_ptr == args || (*save_ptr == ' ' && passed_arg)) {
+			passed_arg = false;
+			arg = strtok_r (NULL, " ", &save_ptr);
+			// save_ptr is modified after strtok_r, need to point to the beginning of arg
+			save_ptr = arg;
+			if (arg == NULL) continue;
+			arg_size = strlen (arg) + 1;
+			argc++;
+			if_->rsp -= arg_size;
+			memcpy (if_->rsp, arg, arg_size);
+			
+		} else if (*save_ptr != ' ') {
+			passed_arg = true;
+		}
+	}
+	// push argv[0] file name
+	size_t file_name_size = strlen (file_name) + 1;
+	if_->rsp -= file_name_size;
+	memcpy (if_->rsp, file_name, file_name_size);
+
+	uintptr_t start_of_args = if_->rsp; // mark the beginning of argv
+
+	// word align
+	while (if_->rsp % 8 != 0)
+		if_->rsp--;
+	
+	if_->rsp -= 8; // argv[argc] is a null pointer
+
+	for (uintptr_t cur = end_of_args - 2; cur >= start_of_args - 1; cur--) {
+		// *(end_of_args - 1) == '\0' is null terminator of argv[argc-1]
+		if (cur + 1 == start_of_args || *((char*) cur) == '\0') {
+			if_->rsp -= 8;
+			*((uint64_t*) if_->rsp) = cur + 1;
+		}
+	}
+
+	if_->R.rsi = if_->rsp;
+	if_->R.rdi = argc;
+	
+	if_->rsp -= 8; // fake return address
+	hex_dump(if_->rsp, if_->rsp , USER_STACK - if_->rsp , true); // for debugging
 
 	success = true;
 
