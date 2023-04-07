@@ -108,6 +108,8 @@ struct thread {
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
+	struct list children;				/* List of children, child_status structs. */
+	struct status *self_status;			/* Status of the thread. */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
@@ -117,6 +119,17 @@ struct thread {
 	/* Owned by thread.c. */
 	struct intr_frame tf;               /* Information for switching */
 	unsigned magic;                     /* Detects stack overflow. */
+};
+
+struct status 
+{
+  struct thread *self;
+  bool exit_called;						
+  bool wait_called;
+  int exit_status;
+  struct lock status_lock;				/* Avoid race condition of accessing struct. */
+  struct semaphore sema_exit;			/* Sema up upon exit. */
+  struct list_elem elem;
 };
 
 /* If false (default), use round-robin scheduler.
@@ -139,6 +152,9 @@ void thread_unblock (struct thread *);
 struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
+
+struct thread *get_thread_by_tid (tid_t);
+void set_status (struct thread *t, int status);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);

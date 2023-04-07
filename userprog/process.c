@@ -17,6 +17,8 @@
 #include "threads/thread.h"
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
+#include "threads/thread.h"
+#include "threads/synch.h"
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
@@ -26,6 +28,7 @@ static void process_cleanup (void);
 static bool load (const char *file_name, char *args, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+void get_child_status (tid_t child_tid, struct list *children, struct status **child_status);
 
 /* General process initializer for initd and other process. */
 static void
@@ -212,7 +215,39 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	return -1;
+
+	struct status *child_status = NULL;
+	struct thread *curr = thread_current ();
+	get_child_status (child_tid, &curr->children, &child_status);
+	if (!child_status) // not direct child
+		return -1;
+	lock_acquire (&child_status->status_lock);
+	int exit_status;
+	if (child_status->wait_called)
+		exit_status = -1; // waited previously
+	else if (!child_status->self && !child_status->exit_called)
+		exit_status = -1; // terminated by kernel
+	else if (!child_status->exit_called) {
+		lock_release (&child_status->status_lock);
+		sema_down (&child_status->sema_exit);
+		lock_acquire (&child_status->status_lock);
+		exit_status = child_status->exit_status;
+	}
+	else
+		exit_status = child_status->exit_status; // child process terminated before wait call
+	child_status->wait_called = true;
+	lock_release (&child_status->status_lock);
+	return exit_status;
+}
+
+/* Stores child status with child_tid in passed child_status pointer. */
+void 
+get_child_status (tid_t child_tid, struct list *children, struct status **child_status) {
+	for (struct list_elem *child_elem = list_begin (children); child_elem != list_end (children); child_elem = list_next (child_elem)) {
+		*child_status = list_entry (child_elem, struct status, elem);
+		if ((*child_status)->self && (*child_status)->self->tid == child_tid)
+			return;
+	}
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -223,7 +258,26 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
-
+	if (curr->self_status) {
+		lock_acquire (&curr->self_status->status_lock);
+		// check if parent freed status struct
+		// if parent freed, then curr->self_status is set to NULL
+		if (curr->self_status) {
+			printf ("%s: exit(%d)\n", curr->name, curr->self_status->exit_status);
+			curr->self_status->self = NULL;
+			curr->self_status->exit_called = true;
+			sema_up (&curr->self_status->sema_exit);
+			lock_release (&curr->self_status->status_lock);
+		}
+	}
+	for (struct list_elem *child_elem = list_begin (&curr->children); child_elem != list_end (&curr->children); child_elem = list_next (child_elem)) {
+		struct status *child_status = list_entry (child_elem, struct status, elem);
+		lock_acquire (&child_status->status_lock);
+		if (child_status->self)
+			child_status->self->self_status = NULL;
+		lock_release (&child_status->status_lock);
+		free (child_status);
+	}
 	process_cleanup ();
 }
 
@@ -443,7 +497,6 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 			argc++;
 			if_->rsp -= arg_size;
 			memcpy (if_->rsp, arg, arg_size);
-			
 		} else if (*save_ptr != ' ') {
 			passed_arg = true;
 		}
@@ -473,7 +526,7 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	if_->R.rdi = argc;
 	
 	if_->rsp -= 8; // fake return address
-	hex_dump(if_->rsp, if_->rsp , USER_STACK - if_->rsp , true); // for debugging
+	// hex_dump(if_->rsp, if_->rsp , USER_STACK - if_->rsp , true); // for debugging
 
 	success = true;
 

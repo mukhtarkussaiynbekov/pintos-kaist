@@ -1,12 +1,16 @@
 #include "userprog/syscall.h"
+#include "userprog/process.h"
 #include <stdio.h>
 #include <syscall-nr.h>
+#include <list.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/synch.h"
 #include "threads/loader.h"
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
+#include "threads/init.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -39,8 +43,29 @@ syscall_init (void) {
 
 /* The main system call interface */
 void
-syscall_handler (struct intr_frame *f UNUSED) {
-	// TODO: Your implementation goes here.
-	printf ("system call!\n");
+syscall_handler (struct intr_frame *f) {
+	switch (f->R.rax) {
+		case SYS_HALT:
+			halt();
+			break;
+		case SYS_EXIT:
+			exit (f->R.rdi);
+			break;
+		case SYS_WAIT:
+			f->R.rax = wait (f->R.rdi);
+			break;
+	}
+}
+
+void halt (void) {
+	power_off ();
+}
+
+void exit (int status) {
+	set_status (thread_current (), status);
 	thread_exit ();
+}
+
+void wait (tid_t pid) {
+	return process_wait (pid);
 }

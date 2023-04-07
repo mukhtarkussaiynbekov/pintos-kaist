@@ -1,4 +1,5 @@
 #include "threads/thread.h"
+#include "threads/malloc.h"
 #include <debug.h>
 #include <stddef.h>
 #include <random.h>
@@ -415,6 +416,37 @@ thread_current (void) {
 	return t;
 }
 
+/* Returns thread represented by tid.
+   Returns NULL if no thread with tid exists.
+*/
+struct thread *
+get_thread_by_tid (tid_t tid) {
+	struct thread *target_thread = NULL;
+	struct thread *cur_thread;
+	for (struct list_elem *cur = list_begin (&ready_with_blocked_list); cur != list_end (&ready_with_blocked_list); cur = list_next (cur)) {
+		cur_thread = list_entry (cur, struct thread, alive_elem);
+		if (cur_thread->tid == tid) {
+			target_thread = cur_thread;
+			break;
+		}
+	}
+	return target_thread;
+}
+
+/* Sets thread's status to provided value. */
+void 
+set_status (struct thread *t, int status) {
+	if (t->self_status) {
+		lock_acquire (&t->self_status->status_lock);
+		// check if parent freed status struct
+		// if parent freed, then curr->self_status is set to NULL
+		if (t->self_status) {
+			t->self_status->exit_status = status;
+			lock_release (&t->self_status->status_lock);
+		}
+	}
+}
+
 /* Returns the running thread's tid. */
 tid_t
 thread_tid (void) {
@@ -580,6 +612,10 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->magic = THREAD_MAGIC;
 	if (t != idle_thread)
 		list_push_back (&ready_with_blocked_list, &t->alive_elem);
+	
+#ifdef USERPROG
+	list_init (&t->children);
+#endif
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
