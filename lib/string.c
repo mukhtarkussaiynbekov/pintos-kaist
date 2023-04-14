@@ -345,3 +345,22 @@ strlcat (char *dst, const char *src, size_t size) {
 	return src_len + dst_len;
 }
 
+/* Copies first argument with null terminator 
+   of src to dst. Assumes dst has enough space.
+*/
+void 
+strcpy_fstarg (char *dst, const char *src) {
+	int length = fstarg_length (src);
+	dst[length] = '\0';
+	strlcpy (dst, src, length+1);
+}
+
+size_t fstarg_length (const char *s) {
+	size_t length = 0;
+	char *cur = s;
+	while (*cur != '\0' && *cur != ' ') {
+		length++;
+		cur++;
+	}
+	return length;
+}

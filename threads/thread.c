@@ -342,6 +342,17 @@ thread_create (const char *name, int priority,
 	t->tf.cs = SEL_KCSEG;
 	t->tf.eflags = FLAG_IF;
 
+#ifdef USERPROG
+	// Initialize child status
+	struct status *child_status = calloc (1, sizeof *child_status);
+	child_status->child_tid = t->tid;
+	child_status->self = t;
+	t->self_status = child_status;
+	lock_init (&child_status->status_lock);
+	sema_init (&child_status->sema_exit, 0);
+	list_push_back (&thread_current ()->children, &child_status->elem);
+#endif
+
 	/* Add to run queue. */
 	thread_unblock (t);
 
@@ -614,6 +625,7 @@ init_thread (struct thread *t, const char *name, int priority) {
 		list_push_back (&ready_with_blocked_list, &t->alive_elem);
 	
 #ifdef USERPROG
+	sema_init (&t->load_sema, 0);
 	list_init (&t->children);
 #endif
 }
@@ -797,4 +809,16 @@ allocate_tid (void) {
 	lock_release (&tid_lock);
 
 	return tid;
+}
+
+/* Stores child status with child_tid in passed child_status pointer. */
+struct status * 
+get_child_status (tid_t child_tid, struct list *children) {
+	struct status *ch_stat;
+	for (struct list_elem *child_elem = list_begin (children); child_elem != list_end (children); child_elem = list_next (child_elem)) {
+		ch_stat = list_entry (child_elem, struct status, elem);
+		if (ch_stat->child_tid == child_tid)
+			return ch_stat;
+	}
+	return NULL;
 }

@@ -1,4 +1,5 @@
 #include "userprog/process.h"
+#include "userprog/syscall.h"
 #include <debug.h>
 #include <inttypes.h>
 #include <round.h>
@@ -19,6 +20,7 @@
 #include "threads/vaddr.h"
 #include "threads/thread.h"
 #include "threads/synch.h"
+#include "threads/malloc.h"
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
@@ -28,7 +30,6 @@ static void process_cleanup (void);
 static bool load (const char *file_name, char *args, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
-void get_child_status (tid_t child_tid, struct list *children, struct status **child_status);
 
 /* General process initializer for initd and other process. */
 static void
@@ -54,7 +55,9 @@ process_create_initd (const char *file_name) {
 	strlcpy (fn_copy, file_name, PGSIZE);
 
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	char tname[fstarg_length (fn_copy) + 1];
+	strcpy_fstarg (tname, fn_copy);
+	tid = thread_create (tname, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
@@ -77,10 +80,17 @@ initd (void *f_name) {
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
+	void **argv = malloc (2 * sizeof (void *));
+	argv[0] = thread_current ();
+	argv[1] = if_;
+
+	// printf ("about to create thread in process_fork\n");
+	// printf("Values of if and parent = %04x %04x\n", argv[1], argv[0]);
+
 	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+			PRI_DEFAULT, __do_fork, argv);
 }
 
 #ifndef VM
@@ -95,21 +105,29 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	if (is_kern_pte (pte)) return true;
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
+	newpage = palloc_get_page (PAL_USER);
+	if (!newpage) return false;
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	// printf("parent_page = %d | newpage = %d\n", parent_page, newpage);
+	memcpy(newpage, parent_page, PGSIZE);
+	writable = is_writable (pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		palloc_free_page (newpage);
+		return false;
 	}
 	return true;
 }
@@ -122,14 +140,20 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 static void
 __do_fork (void *aux) {
 	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
+	// printf ("about to access aux\n");
+	struct thread *parent = (struct thread *) ((void **) aux)[0];
+	// printf ("accessed aux\n");
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
+	struct intr_frame *parent_if = (struct intr_frame *) ((void **) aux)[1];
+
+	// printf("Values of if and parent = %04x %04x\n", parent_if, parent);
+	free((void **) aux);	// malloc called in process_fork
 	bool succ = true;
 
 	/* 1. Read the cpu context to local stack. */
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	if_.R.rax = 0; // child process returns 0 when fork is called
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
@@ -151,6 +175,21 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	for (int i = 0; i < FDT_SIZE; i++) {
+		if (parent->fdt[i]) {
+			current->fdt[i] = file_duplicate (parent->fdt[i]);
+			if (!current->fdt[i]) {
+				goto error;
+			}
+		}
+	}
+	// if (parent->exec_file) {
+	// 	current->exec_file = file_duplicate (parent->exec_file);
+	// 	if (!current->exec_file) {
+	// 			goto error;
+	// 		}
+	// }
+		
 
 	process_init ();
 
@@ -158,6 +197,7 @@ __do_fork (void *aux) {
 	if (succ)
 		do_iret (&if_);
 error:
+	printf ("do_fork failed\n");
 	thread_exit ();
 }
 
@@ -184,11 +224,14 @@ process_exec (void *f_name) {
 		// Impose limit on length of command line arguments
 		return -1;
 	}
+	// printf ("file_name = %s\n", file_name);
 	char *file_title, *args;
 	file_title = strtok_r (file_name, " ", &args); // argv[0]
+	// printf ("file title: %s\n", file_title);
 
 	/* And then load the binary */
 	success = load (file_title, args, &_if); // args == argv[1~argc-1]
+	sema_up (&thread_current ()->load_sema);
 
 	/* If load failed, quit. */
 	palloc_free_page (file_title);
@@ -211,16 +254,18 @@ process_exec (void *f_name) {
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) {
+process_wait (tid_t child_tid) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
 
-	struct status *child_status = NULL;
 	struct thread *curr = thread_current ();
-	get_child_status (child_tid, &curr->children, &child_status);
+	// printf ("process_wait called\n");
+	struct status *child_status = get_child_status (child_tid, &curr->children);
 	if (!child_status) // not direct child
 		return -1;
+	// else
+		// printf ("direct child\n");
 	lock_acquire (&child_status->status_lock);
 	int exit_status;
 	if (child_status->wait_called)
@@ -237,17 +282,8 @@ process_wait (tid_t child_tid UNUSED) {
 		exit_status = child_status->exit_status; // child process terminated before wait call
 	child_status->wait_called = true;
 	lock_release (&child_status->status_lock);
+	// printf ("process wait finished\n");
 	return exit_status;
-}
-
-/* Stores child status with child_tid in passed child_status pointer. */
-void 
-get_child_status (tid_t child_tid, struct list *children, struct status **child_status) {
-	for (struct list_elem *child_elem = list_begin (children); child_elem != list_end (children); child_elem = list_next (child_elem)) {
-		*child_status = list_entry (child_elem, struct status, elem);
-		if ((*child_status)->self && (*child_status)->self->tid == child_tid)
-			return;
-	}
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -263,14 +299,17 @@ process_exit (void) {
 		// check if parent freed status struct
 		// if parent freed, then curr->self_status is set to NULL
 		if (curr->self_status) {
-			printf ("%s: exit(%d)\n", curr->name, curr->self_status->exit_status);
 			curr->self_status->self = NULL;
 			curr->self_status->exit_called = true;
 			sema_up (&curr->self_status->sema_exit);
 			lock_release (&curr->self_status->status_lock);
 		}
 	}
-	for (struct list_elem *child_elem = list_begin (&curr->children); child_elem != list_end (&curr->children); child_elem = list_next (child_elem)) {
+
+	// printf("done process termination message\n");
+	struct list_elem *next_elem;
+	for (struct list_elem *child_elem = list_begin (&curr->children); child_elem != list_end (&curr->children); child_elem = next_elem) {
+		next_elem = list_next (child_elem);
 		struct status *child_status = list_entry (child_elem, struct status, elem);
 		lock_acquire (&child_status->status_lock);
 		if (child_status->self)
@@ -278,6 +317,22 @@ process_exit (void) {
 		lock_release (&child_status->status_lock);
 		free (child_status);
 	}
+	
+	// printf("done children free\n");
+
+	for (int i=2; i<FDT_SIZE; i++) {
+		if (curr->fdt[i]) {
+			file_close (curr->fdt[i]);
+		}
+	}
+	
+	// printf("1. done file close\n");
+	// if (curr->exec_file) {
+	// 	printf ("file exec close is called\n");
+	// 	file_close (curr->exec_file);
+	// }
+
+	// printf("2. done file close\n");
 	process_cleanup ();
 }
 
@@ -403,6 +458,8 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
+	file_deny_write (file);
+	t->exec_file = file;
 
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -476,28 +533,33 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	/* Start address. */
 	if_->rip = ehdr.e_entry;
 
+	// printf ("about to parse args\n");
+	// printf ("rsp = %04x\n", if_->rsp);
+
 	/* Implement argument passing (see project2/argument_passing.html). */
 	uintptr_t end_of_args = if_->rsp; // mark the end of argv
 	uint64_t argc = 1; // we at least have argv[0] file name
 	size_t args_length = strlen (args);
 	size_t arg_size;
-	char *arg, *save_ptr;
+	char *arg, *cur_arg_ptr, *save_ptr;
 	bool passed_arg = false;
-	save_ptr = args; // args == argv[1~argc-1]
+	cur_arg_ptr = args; // args == argv[1~argc-1]
 
 	// push argv[1~argc-1]
-	for (save_ptr = args + args_length; save_ptr >= args; save_ptr--) {
-		if (save_ptr == args || (*save_ptr == ' ' && passed_arg)) {
+	for (cur_arg_ptr = args + args_length; cur_arg_ptr >= args; cur_arg_ptr--) {
+		// printf ("cur_arg_ptr = %04x\n", cur_arg_ptr);
+		save_ptr = cur_arg_ptr;
+		if (cur_arg_ptr == args || (*cur_arg_ptr == ' ' && passed_arg)) {
 			passed_arg = false;
 			arg = strtok_r (NULL, " ", &save_ptr);
 			// save_ptr is modified after strtok_r, need to point to the beginning of arg
-			save_ptr = arg;
+			// save_ptr = arg;
 			if (arg == NULL) continue;
 			arg_size = strlen (arg) + 1;
 			argc++;
 			if_->rsp -= arg_size;
 			memcpy (if_->rsp, arg, arg_size);
-		} else if (*save_ptr != ' ') {
+		} else if (*cur_arg_ptr != ' ') {
 			passed_arg = true;
 		}
 	}
@@ -505,6 +567,8 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	size_t file_name_size = strlen (file_name) + 1;
 	if_->rsp -= file_name_size;
 	memcpy (if_->rsp, file_name, file_name_size);
+	// printf ("rsp = %04x\n", if_->rsp);
+	// printf ("rsp content = %s\n", (char *)if_->rsp);
 
 	uintptr_t start_of_args = if_->rsp; // mark the beginning of argv
 
@@ -526,6 +590,7 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	if_->R.rdi = argc;
 	
 	if_->rsp -= 8; // fake return address
+	// printf ("seems fine args parsing\n");
 	// hex_dump(if_->rsp, if_->rsp , USER_STACK - if_->rsp , true); // for debugging
 
 	success = true;
