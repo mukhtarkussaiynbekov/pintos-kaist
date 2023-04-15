@@ -110,10 +110,13 @@ struct thread {
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
 	struct list children;				/* List of children, child_status structs. */
+	struct lock children_lock;			/* Lock used when modifying children list. */
 	struct status *self_status;			/* Status of the thread. */
 	struct file *fdt[FDT_SIZE];			/* Array of 64 file descriptor pointers. */
 	struct semaphore load_sema;			/* Semaphore to wait for a file load. */
 	struct file *exec_file;				/* File that is being executed by the current thread. */
+	bool is_stdin_open;					/* For dup2. */
+	bool is_stdout_open;				/* For dup2. */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
@@ -129,12 +132,12 @@ struct status
 {
   struct thread *self;
   tid_t child_tid;
-  bool exit_called;						
-  bool wait_called;
   int exit_status;
   struct lock status_lock;				/* Avoid race condition of accessing struct. */
   struct semaphore sema_exit;			/* Sema up upon exit. */
   struct list_elem elem;
+  struct semaphore fork_sema;
+  bool fork_success;
 };
 
 /* If false (default), use round-robin scheduler.

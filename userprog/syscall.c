@@ -34,7 +34,8 @@ int read (int fd, void *buffer, unsigned size);
 int write (int fd, const void *buffer, unsigned size);
 void seek (int fd, unsigned position);
 unsigned tell (int fd);
-// void close (int fd);
+void close (int fd);
+int dup2(int oldfd, int newfd);
 
 /* System call.
  *
@@ -112,6 +113,9 @@ syscall_handler (struct intr_frame *f) {
 		case SYS_CLOSE:
 			close (f->R.rdi);
 			break;
+		case SYS_DUP2:
+			f->R.rax = dup2 (f->R.rdi, f->R.rsi);
+			break;
 	}
 }
 
@@ -130,21 +134,17 @@ halt (void) {
 
 void
 exit (int status) {
-	// printf("setting status %d\n", status);
 	set_status (thread_current (), status);
-	// if (thread_current()->self_status)
-	// 	printf("already set status %d -> %d\n", status, thread_current()->self_status->exit_status);
 	printf ("%s: exit(%d)\n", thread_name (), status);
 
 	thread_exit ();
 }
 
-int
+pid_t
 fork (const char *thread_name, struct intr_frame *if_) {
 	// validate start and end of pointer are valid
 	validate_ptr (thread_name);
 	validate_ptr (thread_name + strlen (thread_name));
-	// printf ("fork success validation of pointers\n");
 	return process_fork (thread_name, if_);
 }
 
@@ -153,29 +153,13 @@ exec (const char *cmd_line, struct intr_frame *if_) {
 	// validate start and end of pointer are valid
 	validate_ptr (cmd_line);
 	validate_ptr (cmd_line + strlen (cmd_line));
-	/* Create a new child to execute CMD_LINE. */
-	char tname[fstarg_length (cmd_line) + 1];
-	// char *tname = malloc (fstarg_length (cmd_line) + 1);
-	strcpy_fstarg (tname, cmd_line);
-	// printf ("tname = %s\n", tname);
-	tid_t child_tid;
-	if ((child_tid = process_fork (tname, if_))) {
-		// printf ("child_tid = %d\n", child_tid);
-		struct status *child_status = get_child_status (child_tid, &thread_current ()->children);
-		// struct thread *child = get_thread_by_tid (child_tid);
-		if (child_status && child_status->self)
-			sema_down (&child_status->self->load_sema);
-		return child_tid;
-		// return wait(child_tid);
-	} else {
-		// printf ("child process is about to call exec\n");
-		// free (tname);
-		return process_exec (cmd_line);
-	}
+	char *cmd_copy = malloc (strlen(cmd_line) + 1);
+	memcpy (cmd_copy, cmd_line, strlen(cmd_line) + 1);
+	return process_exec (cmd_copy, if_);
 }
 
 int
-wait (int pid) {
+wait (pid_t pid) {
 	return process_wait (pid);
 }
 
@@ -239,7 +223,7 @@ read (int fd, void *buffer, unsigned size) {
 	struct thread *curr = thread_current ();
 	int read_count = size;
 	lock_acquire (&fs_lock);
-	if (fd == 0) {
+	if (fd == 0 && curr->is_stdin_open) {
 		for (unsigned i = 0; i < size; i++)
 			((char *) buffer)[i] = input_getc ();
 	} else {
@@ -258,7 +242,7 @@ write (int fd, const void *buffer, unsigned size) {
 	struct thread *curr = thread_current ();
 	int written_count = size;
 	lock_acquire (&fs_lock);
-	if (fd == 1) {
+	if (fd == 1 && curr->is_stdout_open) {
 		putbuf (buffer, size);
 	} else {
 		if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) written_count = -1;
@@ -292,7 +276,42 @@ close (int fd) {
 	struct thread *curr = thread_current ();
 	if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) return;
 	lock_acquire (&fs_lock);
+	struct file *dup_file = NULL;
+	for (int i = 0; i < FDT_SIZE; i++) {
+		if (i == fd) continue;
+		if (curr->fdt[i] == curr->fdt[fd]) {
+			if (!dup_file)
+				dup_file = file_duplicate (curr->fdt[fd]);
+			curr->fdt[i] = dup_file;
+		}
+	}
 	file_close (curr->fdt[fd]);
 	curr->fdt[fd] = NULL;
 	lock_release (&fs_lock);
+}
+
+int 
+dup2(int oldfd, int newfd) {
+	// verify validity of fds
+	if (oldfd < 0 || oldfd >= FDT_SIZE || newfd < 0 || newfd >= FDT_SIZE)
+		return -1;
+	
+	struct thread *curr = thread_current ();
+	if (!curr->fdt[oldfd]) return -1;
+	if (oldfd == newfd) return newfd;
+
+	lock_acquire (&fs_lock);
+	// close newfd if previously open
+	// both closing newfd and setting to oldfd must be performed in one
+	// atomic operation, i.e. single lock acquire
+	if (newfd == 0 && curr->is_stdin_open) {
+		curr->is_stdin_open = false;
+	} else if (newfd == 1 && curr->is_stdout_open) {
+		curr->is_stdout_open = false;
+	} else if (curr->fdt[newfd]) {
+		file_close (curr->fdt[newfd]);
+	}
+	curr->fdt[newfd] = curr->fdt[oldfd];
+	lock_release (&fs_lock);
+	return newfd;
 }

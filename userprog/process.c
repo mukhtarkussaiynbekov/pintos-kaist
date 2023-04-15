@@ -30,6 +30,7 @@ static void process_cleanup (void);
 static bool load (const char *file_name, char *args, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+void set_fork_success (struct thread *t, bool success);
 
 /* General process initializer for initd and other process. */
 static void
@@ -72,7 +73,7 @@ initd (void *f_name) {
 
 	process_init ();
 
-	if (process_exec (f_name) < 0)
+	if (process_exec (f_name, NULL) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
 }
@@ -89,8 +90,29 @@ process_fork (const char *name, struct intr_frame *if_) {
 	// printf ("about to create thread in process_fork\n");
 	// printf("Values of if and parent = %04x %04x\n", argv[1], argv[0]);
 
-	return thread_create (name,
+	tid_t child_tid = thread_create (name,
 			PRI_DEFAULT, __do_fork, argv);
+	struct status *child_status;
+	struct thread *curr = thread_current ();
+	if (child_tid == TID_ERROR) {
+		return TID_ERROR;
+	} else if (child_tid) {
+		// parent process
+		lock_acquire (&curr->children_lock);
+		child_status = get_child_status (child_tid, &curr->children);
+		sema_down (&child_status->fork_sema);
+		// Remove child status from children list and free
+		lock_acquire (&child_status->status_lock);
+		if (!child_status->fork_success) {
+			child_tid = TID_ERROR;
+			list_remove (&child_status->elem);
+			lock_release (&child_status->status_lock);
+			free (child_status);
+		} else
+			lock_release (&child_status->status_lock);
+		lock_release (&curr->children_lock);
+	}
+	return child_tid;
 }
 
 #ifndef VM
@@ -118,7 +140,6 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
-	// printf("parent_page = %d | newpage = %d\n", parent_page, newpage);
 	memcpy(newpage, parent_page, PGSIZE);
 	writable = is_writable (pte);
 
@@ -175,36 +196,64 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	bool dup2_called = false;
+	int j;
 	for (int i = 0; i < FDT_SIZE; i++) {
 		if (parent->fdt[i]) {
+			dup2_called = false;
+			for (j = 0; j < i; j++) {
+				if (parent->fdt[i] == parent->fdt[j]) {
+					dup2_called = true;
+					break;
+				}
+			}
+			if (dup2_called) {
+				current->fdt[i] = current->fdt[j];
+				continue;
+			}
 			current->fdt[i] = file_duplicate (parent->fdt[i]);
 			if (!current->fdt[i]) {
 				goto error;
 			}
 		}
 	}
-	// if (parent->exec_file) {
-	// 	current->exec_file = file_duplicate (parent->exec_file);
-	// 	if (!current->exec_file) {
-	// 			goto error;
-	// 		}
-	// }
-		
+	// current->exec_file = NULL;
+	if (parent->exec_file) {
+		current->exec_file = file_duplicate (parent->exec_file);
+		if (!current->exec_file) {
+				goto error;
+			}
+	}
 
 	process_init ();
 
+	// printf ("success, switch to child\n");
+	// printf ("parent rip = %04x and child rip = %04x\n", parent_if->rip, if_.rip);
 	/* Finally, switch to the newly created process. */
-	if (succ)
+	if (succ) {
+		set_fork_success (current, true);
 		do_iret (&if_);
+	}
 error:
-	printf ("do_fork failed\n");
-	thread_exit ();
+	// printf ("do_fork failed\n");
+	set_fork_success (current, false);
+	exit (-1);
+}
+
+void 
+set_fork_success (struct thread *t, bool success) {
+	if (t->self_status) {
+		lock_acquire (&t->self_status->status_lock);
+		t->self_status->fork_success = success;
+		sema_up (&t->self_status->fork_sema);
+		lock_release (&t->self_status->status_lock);
+	}
 }
 
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
 int
-process_exec (void *f_name) {
+process_exec (void *f_name, struct intr_frame *syscaller_if) {
 	char *file_name = f_name;
 	bool success;
 
@@ -217,7 +266,8 @@ process_exec (void *f_name) {
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
 	/* We first kill the current context */
-	process_cleanup ();
+	if (!syscaller_if)
+		process_cleanup ();
 
 	/* Second, we separate file name and arguments */
 	if (strlen (file_name) >= PGSIZE) {
@@ -230,16 +280,18 @@ process_exec (void *f_name) {
 	// printf ("file title: %s\n", file_title);
 
 	/* And then load the binary */
-	success = load (file_title, args, &_if); // args == argv[1~argc-1]
-	sema_up (&thread_current ()->load_sema);
+	success = load (file_title, args, !syscaller_if ? &_if : syscaller_if); // args == argv[1~argc-1]
 
 	/* If load failed, quit. */
-	palloc_free_page (file_title);
+	if (syscaller_if)
+		free (file_name);
+	else
+		palloc_free_page (file_name);
 	if (!success)
 		return -1;
 
 	/* Start switched process. */
-	do_iret (&_if);
+	do_iret (!syscaller_if ? &_if : syscaller_if);
 	NOT_REACHED ();
 }
 
@@ -266,22 +318,16 @@ process_wait (tid_t child_tid) {
 		return -1;
 	// else
 		// printf ("direct child\n");
+	sema_down (&child_status->sema_exit);
+
+	// Remove child status from children list and free
+	lock_acquire (&curr->children_lock);
 	lock_acquire (&child_status->status_lock);
-	int exit_status;
-	if (child_status->wait_called)
-		exit_status = -1; // waited previously
-	else if (!child_status->self && !child_status->exit_called)
-		exit_status = -1; // terminated by kernel
-	else if (!child_status->exit_called) {
-		lock_release (&child_status->status_lock);
-		sema_down (&child_status->sema_exit);
-		lock_acquire (&child_status->status_lock);
-		exit_status = child_status->exit_status;
-	}
-	else
-		exit_status = child_status->exit_status; // child process terminated before wait call
-	child_status->wait_called = true;
+	int exit_status = child_status->exit_status;
+	list_remove (&child_status->elem);
 	lock_release (&child_status->status_lock);
+	lock_release (&curr->children_lock);
+	free (child_status);
 	// printf ("process wait finished\n");
 	return exit_status;
 }
@@ -300,23 +346,23 @@ process_exit (void) {
 		// if parent freed, then curr->self_status is set to NULL
 		if (curr->self_status) {
 			curr->self_status->self = NULL;
-			curr->self_status->exit_called = true;
 			sema_up (&curr->self_status->sema_exit);
 			lock_release (&curr->self_status->status_lock);
 		}
 	}
 
 	// printf("done process termination message\n");
-	struct list_elem *next_elem;
-	for (struct list_elem *child_elem = list_begin (&curr->children); child_elem != list_end (&curr->children); child_elem = next_elem) {
-		next_elem = list_next (child_elem);
-		struct status *child_status = list_entry (child_elem, struct status, elem);
+	lock_acquire (&curr->children_lock);
+	struct status *child_status;
+	while (!list_empty (&curr->children)) {
+		child_status = list_entry (list_pop_front (&curr->children), struct status, elem);
 		lock_acquire (&child_status->status_lock);
 		if (child_status->self)
 			child_status->self->self_status = NULL;
 		lock_release (&child_status->status_lock);
 		free (child_status);
 	}
+	lock_release (&curr->children_lock);
 	
 	// printf("done children free\n");
 
@@ -327,10 +373,10 @@ process_exit (void) {
 	}
 	
 	// printf("1. done file close\n");
-	// if (curr->exec_file) {
-	// 	printf ("file exec close is called\n");
-	// 	file_close (curr->exec_file);
-	// }
+	if (curr->exec_file) {
+		// printf ("file exec close is called\n");
+		file_close (curr->exec_file);
+	}
 
 	// printf("2. done file close\n");
 	process_cleanup ();
@@ -459,6 +505,8 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 		goto done;
 	}
 	file_deny_write (file);
+	if (t->exec_file)
+		file_close (t->exec_file);
 	t->exec_file = file;
 
 	/* Read and verify executable header. */
@@ -597,7 +645,7 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	sema_up (&thread_current ()->load_sema);
 	return success;
 }
 

@@ -350,6 +350,7 @@ thread_create (const char *name, int priority,
 	t->self_status = child_status;
 	lock_init (&child_status->status_lock);
 	sema_init (&child_status->sema_exit, 0);
+	sema_init (&child_status->fork_sema, 0);
 	list_push_back (&thread_current ()->children, &child_status->elem);
 #endif
 
@@ -627,6 +628,9 @@ init_thread (struct thread *t, const char *name, int priority) {
 #ifdef USERPROG
 	sema_init (&t->load_sema, 0);
 	list_init (&t->children);
+	lock_init (&t->children_lock);
+	t->is_stdin_open = true;
+	t->is_stdout_open = true;
 #endif
 }
 

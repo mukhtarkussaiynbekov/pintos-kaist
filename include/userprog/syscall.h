@@ -2,7 +2,8 @@
 #define USERPROG_SYSCALL_H
 
 void syscall_init (void);
-void close (int fd);
 void exit (int status);
+
+typedef int pid_t;
 
 #endif /* userprog/syscall.h */
