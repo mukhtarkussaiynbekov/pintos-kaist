@@ -2,6 +2,7 @@
 #include <debug.h>
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "threads/thread.h"
 
 /* An open file. */
 struct file {
@@ -9,6 +10,26 @@ struct file {
 	off_t pos;                  /* Current position. */
 	bool deny_write;            /* Has file_deny_write() been called? */
 };
+
+bool fdt_entry_fd_less (const struct list_elem *a_, const struct list_elem *b_,
+            void *aux UNUSED) {
+	const struct fdt_entry *a = list_entry (a_, struct fdt_entry, elem);
+	const struct fdt_entry *b = list_entry (b_, struct fdt_entry, elem);
+	
+	return a->fd < b->fd;
+}
+
+struct fdt_entry *get_fdt_entry_by_fd (int fd) {
+	if (fd < 0) return NULL;
+	struct list *fdt = &thread_current ()->fdt;
+	struct fdt_entry *cur_fdt_entry;
+	for (struct list_elem *cur = list_begin (fdt); cur != list_end (fdt); cur = list_next (cur)) {
+		cur_fdt_entry = list_entry (cur, struct fdt_entry, elem);
+		if (cur_fdt_entry->fd == fd)
+			return cur_fdt_entry;
+	}
+	return NULL;
+}
 
 /* Opens a file for the given INODE, of which it takes ownership,
  * and returns the new file.  Returns a null pointer if an

@@ -15,6 +15,7 @@
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "devices/input.h"
+#include "threads/malloc.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -36,6 +37,7 @@ void seek (int fd, unsigned position);
 unsigned tell (int fd);
 void close (int fd);
 int dup2(int oldfd, int newfd);
+void close_without_fs_lock (int fd);
 
 /* System call.
  *
@@ -68,13 +70,24 @@ syscall_init (void) {
 /* The main system call interface */
 void
 syscall_handler (struct intr_frame *f) {
-	// printf("syscall_handler = %d\n", f->R.rax);
+	struct thread *t = thread_current ();
+	if (!t->stdin) {
+		t->stdin = true;
+		t->stdout = true;
+		struct fdt_entry *stdin = malloc (sizeof (struct fdt_entry));
+		struct fdt_entry *stdout = malloc (sizeof (struct fdt_entry));
+		stdin->fd = STDIN_FILENO;
+		stdin->file = &t->stdin;
+		stdout->fd = STDOUT_FILENO;
+		stdout->file = &t->stdout;
+		list_insert_ordered (&t->fdt, &stdin->elem, fdt_entry_fd_less, NULL);
+		list_insert_ordered (&t->fdt, &stdout->elem, fdt_entry_fd_less, NULL);
+	}
 	switch (f->R.rax) {
 		case SYS_HALT:
 			halt();
 			break;
 		case SYS_EXIT:
-			// printf("Rdi = %d\n", f->R.rdi);
 			exit (f->R.rdi);
 			break;
 		case SYS_WAIT:
@@ -122,7 +135,6 @@ syscall_handler (struct intr_frame *f) {
 void
 validate_ptr (void *p) {
 	if (!p || is_kernel_vaddr (p) || !pml4_get_page (thread_current ()->pml4, p)) {
-		// printf ("validation failed\n");
 		exit (-1);
 	}
 }
@@ -190,16 +202,27 @@ open (const char *file) {
 	// validate start and end of pointer are valid
 	validate_ptr (file);
 	validate_ptr (file + strlen (file));
-	struct thread *curr = thread_current ();
-	int open_status = -1;
 	lock_acquire (&fs_lock);
-	for (int i = 2; i < FDT_SIZE; i++) {
-		if (!curr->fdt[i]) {
-			curr->fdt[i] = filesys_open (file);
-			if (curr->fdt[i])
-				open_status = i;
-			break;
-		}
+	struct thread *current = thread_current ();
+	int open_status = -1;
+	int prevfd = -1;
+	struct fdt_entry *cur_entry;
+	struct list_elem *cur;
+	for (cur = list_begin (&current->fdt); cur != list_end (&current->fdt); cur = list_next (cur)) {
+		cur_entry = list_entry (cur, struct fdt_entry, elem);
+		if (prevfd + 1 < cur_entry->fd) break;
+		prevfd++;
+	}
+	struct file *new_file = filesys_open (file);
+	if (new_file) {
+		struct fdt_entry *new_fdt_entry = malloc (sizeof (struct fdt_entry));
+		new_fdt_entry->fd = prevfd + 1;
+		new_fdt_entry->file = filesys_open (file);
+		if (new_fdt_entry->file) {
+			list_insert (cur, &new_fdt_entry->elem);
+			open_status = new_fdt_entry->fd;
+		} else
+			free (new_fdt_entry);
 	}
 	lock_release (&fs_lock);
 	return open_status;
@@ -207,10 +230,14 @@ open (const char *file) {
 
 int
 filesize (int fd) {
-	struct thread *curr = thread_current ();
-	if (!curr->fdt[fd]) return -1;
 	lock_acquire (&fs_lock);
-	int file_size = file_length (curr->fdt[fd]);
+	struct thread *curr = thread_current ();
+	int file_size;
+	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
+	if (!target_entry || target_entry->file == &curr->stdin || target_entry->file == &curr->stdout)
+		file_size = -1;
+	else
+		file_size = file_length (target_entry->file);
 	lock_release (&fs_lock);
 	return file_size;
 }
@@ -220,16 +247,17 @@ read (int fd, void *buffer, unsigned size) {
 	// validate start and end of pointer are valid
 	validate_ptr (buffer);
 	validate_ptr (buffer + size - 1);
-	struct thread *curr = thread_current ();
-	int read_count = size;
 	lock_acquire (&fs_lock);
-	if (fd == 0 && curr->is_stdin_open) {
+	struct thread *curr = thread_current ();
+	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
+	int read_count = size;
+	if (!target_entry || target_entry->file == &curr->stdout) 
+		read_count = -1;
+	else if (target_entry->file == &curr->stdin) {
 		for (unsigned i = 0; i < size; i++)
 			((char *) buffer)[i] = input_getc ();
-	} else {
-		if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) read_count = -1;
-		else read_count = file_read (curr->fdt[fd], buffer, size);
-	}
+	} else
+		read_count = file_read (target_entry->file, buffer, size);
 	lock_release (&fs_lock);
 	return read_count;
 }
@@ -239,79 +267,99 @@ write (int fd, const void *buffer, unsigned size) {
 	// validate start and end of pointer are valid
 	validate_ptr (buffer);
 	validate_ptr (buffer + size - 1);
-	struct thread *curr = thread_current ();
-	int written_count = size;
 	lock_acquire (&fs_lock);
-	if (fd == 1 && curr->is_stdout_open) {
+	struct thread *curr = thread_current ();
+	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
+	int written_count = size;
+	if (!target_entry || target_entry->file == &curr->stdin) 
+		written_count = -1;
+	else if (target_entry->file == &curr->stdout)
 		putbuf (buffer, size);
-	} else {
-		if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) written_count = -1;
-		else written_count = file_write (curr->fdt[fd], buffer, size);
-	}
+	else
+		written_count = file_write (target_entry->file, buffer, size);
 	lock_release (&fs_lock);
 	return written_count;
 }
 
 void 
 seek (int fd, unsigned position) {
-	struct thread *curr = thread_current ();
-	if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) return;
 	lock_acquire (&fs_lock);
-	file_seek (curr->fdt[fd], position);
+	struct thread *curr = thread_current ();
+	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
+	if (target_entry && !(target_entry->file == &curr->stdin || target_entry->file == &curr->stdout))
+		file_seek (target_entry->file, position);
 	lock_release (&fs_lock);
 }
 
 unsigned
 tell (int fd) {
-	struct thread *curr = thread_current ();
-	if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) return 0;
+	unsigned ftell;
 	lock_acquire (&fs_lock);
-	unsigned ftell = file_tell (curr->fdt[fd]);
+	struct thread *curr = thread_current ();
+	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
+	if (!target_entry || target_entry->file == &curr->stdin || target_entry->file == &curr->stdout)
+		ftell = 0;
+	else
+		ftell = file_tell (target_entry->file);
 	lock_release (&fs_lock);
 	return ftell;
 }
 
 void 
 close (int fd) {
-	struct thread *curr = thread_current ();
-	if (fd < 0 || fd >= FDT_SIZE || !curr->fdt[fd]) return;
 	lock_acquire (&fs_lock);
-	struct file *dup_file = NULL;
-	for (int i = 0; i < FDT_SIZE; i++) {
-		if (i == fd) continue;
-		if (curr->fdt[i] == curr->fdt[fd]) {
-			if (!dup_file)
-				dup_file = file_duplicate (curr->fdt[fd]);
-			curr->fdt[i] = dup_file;
-		}
-	}
-	file_close (curr->fdt[fd]);
-	curr->fdt[fd] = NULL;
+	close_without_fs_lock (fd);
 	lock_release (&fs_lock);
 }
 
 int 
 dup2(int oldfd, int newfd) {
 	// verify validity of fds
-	if (oldfd < 0 || oldfd >= FDT_SIZE || newfd < 0 || newfd >= FDT_SIZE)
+	if (oldfd < 0 || newfd < 0)
 		return -1;
-	
-	struct thread *curr = thread_current ();
-	if (!curr->fdt[oldfd]) return -1;
-	if (oldfd == newfd) return newfd;
 
-	lock_acquire (&fs_lock);
 	// close newfd if previously open
 	// both closing newfd and setting to oldfd must be performed in one
 	// atomic operation, i.e. single lock acquire
-	if (newfd == 0 && curr->is_stdin_open) {
-		curr->is_stdin_open = false;
-	} else if (newfd == 1 && curr->is_stdout_open) {
-		curr->is_stdout_open = false;
-	} else if (curr->fdt[newfd]) {
-		file_close (curr->fdt[newfd]);
+
+	int resfd;
+	lock_acquire (&fs_lock);
+	struct fdt_entry *old_fdt_entry = get_fdt_entry_by_fd (oldfd);
+	if (!old_fdt_entry) resfd = -1;
+	else if (oldfd == newfd) resfd = newfd;
+	else {
+		close_without_fs_lock (newfd);
+		struct fdt_entry *new_fdt_entry = malloc (sizeof (struct fdt_entry));
+		new_fdt_entry->fd = newfd;
+		new_fdt_entry->file = old_fdt_entry->file;
+		list_insert_ordered (&thread_current ()->fdt, &new_fdt_entry->elem, fdt_entry_fd_less, NULL);
+		resfd = newfd;
 	}
-	curr->fdt[newfd] = curr->fdt[oldfd];
 	lock_release (&fs_lock);
-	return newfd;
+	return resfd;
+}
+
+void 
+close_without_fs_lock (int fd) {
+	if (fd < 0) return;
+	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
+	if (!target_entry) return;
+	struct thread *current = thread_current ();
+	struct file *dup_file = NULL;
+	struct fdt_entry *cur_entry;
+	if (!(target_entry->file == &current->stdin || target_entry->file == &current->stdout)) {
+		for (struct list_elem *cur_elem = list_begin (&current->fdt); cur_elem != list_end (&current->fdt); cur_elem = list_next (cur_elem)) {
+			cur_entry = list_entry (cur_elem, struct fdt_entry, elem);
+			if (cur_entry == target_entry) continue;
+			if (cur_entry->file == target_entry->file) {
+				if (!dup_file) {
+					dup_file = file_duplicate (target_entry->file);
+					if (!dup_file) exit (-1);
+				}
+				cur_entry->file = dup_file;
+			}
+		}
+	}
+	list_remove (&target_entry->elem);
+	free (target_entry);
 }

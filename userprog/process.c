@@ -87,9 +87,6 @@ process_fork (const char *name, struct intr_frame *if_) {
 	argv[0] = thread_current ();
 	argv[1] = if_;
 
-	// printf ("about to create thread in process_fork\n");
-	// printf("Values of if and parent = %04x %04x\n", argv[1], argv[0]);
-
 	tid_t child_tid = thread_create (name,
 			PRI_DEFAULT, __do_fork, argv);
 	struct status *child_status;
@@ -126,27 +123,27 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	void *newpage;
 	bool writable;
 
-	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	/* 1. If the parent_page is kernel page, then return immediately. */
 	if (is_kern_pte (pte)) return true;
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
 
-	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
-	 *    TODO: NEWPAGE. */
+	/* 3. Allocate new PAL_USER page for the child and set result to
+	 *    NEWPAGE. */
 	newpage = palloc_get_page (PAL_USER);
 	if (!newpage) return false;
 
-	/* 4. TODO: Duplicate parent's page to the new page and
-	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
+	/* 4. Duplicate parent's page to the new page and
+	 *    check whether parent's page is writable or not (set WRITABLE
+	 *    according to the result). */
 	memcpy(newpage, parent_page, PGSIZE);
 	writable = is_writable (pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
-		/* 6. TODO: if fail to insert page, do error handling. */
+		/* 6. If fail to insert page, do error handling. */
 		palloc_free_page (newpage);
 		return false;
 	}
@@ -154,21 +151,14 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 }
 #endif
 
-/* A thread function that copies parent's execution context.
- * Hint) parent->tf does not hold the userland context of the process.
- *       That is, you are required to pass second argument of process_fork to
- *       this function. */
+/* A thread function that copies parent's execution context. */
 static void
 __do_fork (void *aux) {
 	struct intr_frame if_;
-	// printf ("about to access aux\n");
 	struct thread *parent = (struct thread *) ((void **) aux)[0];
-	// printf ("accessed aux\n");
 	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
 	struct intr_frame *parent_if = (struct intr_frame *) ((void **) aux)[1];
 
-	// printf("Values of if and parent = %04x %04x\n", parent_if, parent);
 	free((void **) aux);	// malloc called in process_fork
 	bool succ = true;
 
@@ -191,32 +181,44 @@ __do_fork (void *aux) {
 		goto error;
 #endif
 
-	/* TODO: Your code goes here.
-	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
-	 * TODO:       in include/filesys/file.h. Note that parent should not return
-	 * TODO:       from the fork() until this function successfully duplicates
-	 * TODO:       the resources of parent.*/
 	bool dup2_called = false;
-	int j;
-	for (int i = 0; i < FDT_SIZE; i++) {
-		if (parent->fdt[i]) {
+	struct list_elem *temp_fdt_elem;	// parent's fdt entry
+	struct list_elem *next_fdt_elem;	// parent's fdt entry
+	struct list_elem *prev_fdt_elem;	// current's fdt entry
+	struct fdt_entry *temp_fdt_entry;	// parent's fdt entry
+	struct fdt_entry *cur_fdt_entry;	// parent's fdt entry
+	struct fdt_entry *new_fdt_entry;	// current's fdt entry
+	for (struct list_elem *cur_fdt_elem = list_begin (&parent->fdt); cur_fdt_elem != list_end (&parent->fdt); cur_fdt_elem = list_next (cur_fdt_elem)) {
+		cur_fdt_entry = list_entry (cur_fdt_elem, struct fdt_entry, elem);
+		new_fdt_entry = malloc (sizeof (struct fdt_entry));
+		list_push_back (&current->fdt, &new_fdt_entry->elem);
+		new_fdt_entry->fd = cur_fdt_entry->fd;
+		if (cur_fdt_entry->file == &parent->stdin)
+			new_fdt_entry->file = &current->stdin;
+		else if (cur_fdt_entry->file == &parent->stdout)
+			new_fdt_entry->file = &current->stdout;
+		else {
 			dup2_called = false;
-			for (j = 0; j < i; j++) {
-				if (parent->fdt[i] == parent->fdt[j]) {
+			prev_fdt_elem = list_begin (&current->fdt);
+			for (temp_fdt_elem = list_begin (&parent->fdt); temp_fdt_elem != cur_fdt_elem; temp_fdt_elem = list_next (temp_fdt_elem)) {
+				temp_fdt_entry = list_entry (temp_fdt_elem, struct fdt_entry, elem);
+				if (temp_fdt_entry->file == cur_fdt_entry->file) {
 					dup2_called = true;
 					break;
 				}
+				prev_fdt_elem = list_next (prev_fdt_elem);
 			}
 			if (dup2_called) {
-				current->fdt[i] = current->fdt[j];
+				new_fdt_entry->file = list_entry (prev_fdt_elem, struct fdt_entry, elem)->file;
 				continue;
 			}
-			current->fdt[i] = file_duplicate (parent->fdt[i]);
-			if (!current->fdt[i]) {
+			new_fdt_entry->file = file_duplicate (cur_fdt_entry->file);
+			if (!new_fdt_entry->file)
 				goto error;
-			}
 		}
 	}
+	current->stdin = true;
+	current->stdout = true;
 	// current->exec_file = NULL;
 	if (parent->exec_file) {
 		current->exec_file = file_duplicate (parent->exec_file);
@@ -227,15 +229,12 @@ __do_fork (void *aux) {
 
 	process_init ();
 
-	// printf ("success, switch to child\n");
-	// printf ("parent rip = %04x and child rip = %04x\n", parent_if->rip, if_.rip);
 	/* Finally, switch to the newly created process. */
 	if (succ) {
 		set_fork_success (current, true);
 		do_iret (&if_);
 	}
 error:
-	// printf ("do_fork failed\n");
 	set_fork_success (current, false);
 	exit (-1);
 }
@@ -274,10 +273,8 @@ process_exec (void *f_name, struct intr_frame *syscaller_if) {
 		// Impose limit on length of command line arguments
 		return -1;
 	}
-	// printf ("file_name = %s\n", file_name);
 	char *file_title, *args;
 	file_title = strtok_r (file_name, " ", &args); // argv[0]
-	// printf ("file title: %s\n", file_title);
 
 	/* And then load the binary */
 	success = load (file_title, args, !syscaller_if ? &_if : syscaller_if); // args == argv[1~argc-1]
@@ -307,17 +304,10 @@ process_exec (void *f_name, struct intr_frame *syscaller_if) {
  * does nothing. */
 int
 process_wait (tid_t child_tid) {
-	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
-	 * XXX:       to add infinite loop here before
-	 * XXX:       implementing the process_wait. */
-
 	struct thread *curr = thread_current ();
-	// printf ("process_wait called\n");
 	struct status *child_status = get_child_status (child_tid, &curr->children);
 	if (!child_status) // not direct child
 		return -1;
-	// else
-		// printf ("direct child\n");
 	sema_down (&child_status->sema_exit);
 
 	// Remove child status from children list and free
@@ -328,7 +318,6 @@ process_wait (tid_t child_tid) {
 	lock_release (&child_status->status_lock);
 	lock_release (&curr->children_lock);
 	free (child_status);
-	// printf ("process wait finished\n");
 	return exit_status;
 }
 
@@ -336,10 +325,6 @@ process_wait (tid_t child_tid) {
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
-	/* TODO: Your code goes here.
-	 * TODO: Implement process termination message (see
-	 * TODO: project2/process_termination.html).
-	 * TODO: We recommend you to implement process resource cleanup here. */
 	if (curr->self_status) {
 		lock_acquire (&curr->self_status->status_lock);
 		// check if parent freed status struct
@@ -351,7 +336,6 @@ process_exit (void) {
 		}
 	}
 
-	// printf("done process termination message\n");
 	lock_acquire (&curr->children_lock);
 	struct status *child_status;
 	while (!list_empty (&curr->children)) {
@@ -364,21 +348,31 @@ process_exit (void) {
 	}
 	lock_release (&curr->children_lock);
 	
-	// printf("done children free\n");
-
-	for (int i=2; i<FDT_SIZE; i++) {
-		if (curr->fdt[i]) {
-			file_close (curr->fdt[i]);
+	struct list_elem *temp_fdt_elem;
+	struct list_elem *next_fdt_elem;
+	struct fdt_entry *temp_fdt_entry;
+	struct fdt_entry *cur_fdt_entry;
+	for (struct list_elem *cur_fdt_elem = list_begin (&curr->fdt); cur_fdt_elem != list_end (&curr->fdt); cur_fdt_elem = next_fdt_elem) {
+		cur_fdt_entry = list_entry (cur_fdt_elem, struct fdt_entry, elem);
+		for (temp_fdt_elem = list_next (cur_fdt_elem); temp_fdt_elem != list_end (&curr->fdt); temp_fdt_elem = next_fdt_elem) {
+			next_fdt_elem = list_next (temp_fdt_elem);
+			temp_fdt_entry = list_entry (temp_fdt_elem, struct fdt_entry, elem);
+			if (temp_fdt_entry->file == cur_fdt_entry->file) {
+				list_remove (temp_fdt_elem);
+				free (temp_fdt_entry);
+			}
 		}
+		next_fdt_elem = list_next (cur_fdt_elem);
+		if (cur_fdt_entry->file && !(cur_fdt_entry->file == &curr->stdin || cur_fdt_entry->file == &curr->stdout))
+			file_close (cur_fdt_entry->file);
+		list_remove (cur_fdt_elem);
+		free (cur_fdt_entry);
 	}
 	
-	// printf("1. done file close\n");
 	if (curr->exec_file) {
-		// printf ("file exec close is called\n");
 		file_close (curr->exec_file);
 	}
 
-	// printf("2. done file close\n");
 	process_cleanup ();
 }
 
@@ -581,9 +575,6 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	/* Start address. */
 	if_->rip = ehdr.e_entry;
 
-	// printf ("about to parse args\n");
-	// printf ("rsp = %04x\n", if_->rsp);
-
 	/* Implement argument passing (see project2/argument_passing.html). */
 	uintptr_t end_of_args = if_->rsp; // mark the end of argv
 	uint64_t argc = 1; // we at least have argv[0] file name
@@ -595,7 +586,6 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 
 	// push argv[1~argc-1]
 	for (cur_arg_ptr = args + args_length; cur_arg_ptr >= args; cur_arg_ptr--) {
-		// printf ("cur_arg_ptr = %04x\n", cur_arg_ptr);
 		save_ptr = cur_arg_ptr;
 		if (cur_arg_ptr == args || (*cur_arg_ptr == ' ' && passed_arg)) {
 			passed_arg = false;
@@ -615,8 +605,6 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	size_t file_name_size = strlen (file_name) + 1;
 	if_->rsp -= file_name_size;
 	memcpy (if_->rsp, file_name, file_name_size);
-	// printf ("rsp = %04x\n", if_->rsp);
-	// printf ("rsp content = %s\n", (char *)if_->rsp);
 
 	uintptr_t start_of_args = if_->rsp; // mark the beginning of argv
 
@@ -638,7 +626,6 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 	if_->R.rdi = argc;
 	
 	if_->rsp -= 8; // fake return address
-	// printf ("seems fine args parsing\n");
 	// hex_dump(if_->rsp, if_->rsp , USER_STACK - if_->rsp , true); // for debugging
 
 	success = true;

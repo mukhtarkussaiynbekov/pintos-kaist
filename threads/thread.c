@@ -15,6 +15,7 @@
 #include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "filesys/file.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -629,8 +630,9 @@ init_thread (struct thread *t, const char *name, int priority) {
 	sema_init (&t->load_sema, 0);
 	list_init (&t->children);
 	lock_init (&t->children_lock);
-	t->is_stdin_open = true;
-	t->is_stdout_open = true;
+	list_init (&t->fdt);
+	t->stdin = false;
+	t->stdout = false;
 #endif
 }
 

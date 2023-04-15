@@ -24,7 +24,6 @@ enum thread_status {
 typedef int tid_t;
 typedef int fixed_point_t;
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
-#define FDT_SIZE 64						/* File Descriptor Table size*/
 
 /* Thread priorities. */
 #define PRI_MIN 0                       /* Lowest priority. */
@@ -112,11 +111,11 @@ struct thread {
 	struct list children;				/* List of children, child_status structs. */
 	struct lock children_lock;			/* Lock used when modifying children list. */
 	struct status *self_status;			/* Status of the thread. */
-	struct file *fdt[FDT_SIZE];			/* Array of 64 file descriptor pointers. */
+	struct list fdt;					/* File Descriptor Table. */
 	struct semaphore load_sema;			/* Semaphore to wait for a file load. */
 	struct file *exec_file;				/* File that is being executed by the current thread. */
-	bool is_stdin_open;					/* For dup2. */
-	bool is_stdout_open;				/* For dup2. */
+	bool stdin;							/* For dup2, value is not used. */
+	bool stdout;						/* For dup2, value is not used. */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
