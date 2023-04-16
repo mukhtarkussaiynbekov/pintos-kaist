@@ -346,6 +346,10 @@ thread_create (const char *name, int priority,
 #ifdef USERPROG
 	// Initialize child status
 	struct status *child_status = calloc (1, sizeof *child_status);
+	if (!child_status) {
+		palloc_free_page (t);
+		return TID_ERROR;
+	}
 	child_status->child_tid = t->tid;
 	child_status->self = t;
 	t->self_status = child_status;

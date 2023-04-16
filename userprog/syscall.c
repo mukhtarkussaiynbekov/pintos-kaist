@@ -38,6 +38,7 @@ unsigned tell (int fd);
 void close (int fd);
 int dup2(int oldfd, int newfd);
 void close_without_fs_lock (int fd);
+bool init_fds (void);
 
 /* System call.
  *
@@ -70,19 +71,6 @@ syscall_init (void) {
 /* The main system call interface */
 void
 syscall_handler (struct intr_frame *f) {
-	struct thread *t = thread_current ();
-	if (!t->stdin) {
-		t->stdin = true;
-		t->stdout = true;
-		struct fdt_entry *stdin = malloc (sizeof (struct fdt_entry));
-		struct fdt_entry *stdout = malloc (sizeof (struct fdt_entry));
-		stdin->fd = STDIN_FILENO;
-		stdin->file = &t->stdin;
-		stdout->fd = STDOUT_FILENO;
-		stdout->file = &t->stdout;
-		list_insert_ordered (&t->fdt, &stdin->elem, fdt_entry_fd_less, NULL);
-		list_insert_ordered (&t->fdt, &stdout->elem, fdt_entry_fd_less, NULL);
-	}
 	switch (f->R.rax) {
 		case SYS_HALT:
 			halt();
@@ -132,6 +120,28 @@ syscall_handler (struct intr_frame *f) {
 	}
 }
 
+bool 
+init_fds () {
+	struct thread *t = thread_current ();
+	if (!t->stdin) {
+		struct fdt_entry *stdin = malloc (sizeof (struct fdt_entry));
+		if (!stdin) return false;
+		stdin->fd = STDIN_FILENO;
+		stdin->file = &t->stdin;
+		list_insert_ordered (&t->fdt, &stdin->elem, fdt_entry_fd_less, NULL);
+		t->stdin = true;
+	}
+	if (!t->stdout) {
+		struct fdt_entry *stdout = malloc (sizeof (struct fdt_entry));
+		if (!stdout) return false;
+		stdout->fd = STDOUT_FILENO;
+		stdout->file = &t->stdout;
+		list_insert_ordered (&t->fdt, &stdout->elem, fdt_entry_fd_less, NULL);
+		t->stdout = true;
+	}
+	return true;
+}
+
 void
 validate_ptr (void *p) {
 	if (!p || is_kernel_vaddr (p) || !pml4_get_page (thread_current ()->pml4, p)) {
@@ -157,6 +167,7 @@ fork (const char *thread_name, struct intr_frame *if_) {
 	// validate start and end of pointer are valid
 	validate_ptr (thread_name);
 	validate_ptr (thread_name + strlen (thread_name));
+	if (!init_fds ()) return TID_ERROR;
 	return process_fork (thread_name, if_);
 }
 
@@ -202,6 +213,7 @@ open (const char *file) {
 	// validate start and end of pointer are valid
 	validate_ptr (file);
 	validate_ptr (file + strlen (file));
+	if (!init_fds ()) return -1;
 	lock_acquire (&fs_lock);
 	struct thread *current = thread_current ();
 	int open_status = -1;
@@ -213,12 +225,12 @@ open (const char *file) {
 		if (prevfd + 1 < cur_entry->fd) break;
 		prevfd++;
 	}
-	struct file *new_file = filesys_open (file);
-	if (new_file) {
-		struct fdt_entry *new_fdt_entry = malloc (sizeof (struct fdt_entry));
-		new_fdt_entry->fd = prevfd + 1;
-		new_fdt_entry->file = filesys_open (file);
-		if (new_fdt_entry->file) {
+	struct fdt_entry *new_fdt_entry = malloc (sizeof (struct fdt_entry));
+	if (new_fdt_entry) {
+		struct file *new_file = filesys_open (file);
+		if (new_file) {
+			new_fdt_entry->fd = prevfd + 1;
+			new_fdt_entry->file = new_file;
 			list_insert (cur, &new_fdt_entry->elem);
 			open_status = new_fdt_entry->fd;
 		} else
@@ -247,6 +259,7 @@ read (int fd, void *buffer, unsigned size) {
 	// validate start and end of pointer are valid
 	validate_ptr (buffer);
 	validate_ptr (buffer + size - 1);
+	if (!init_fds ()) return -1;
 	lock_acquire (&fs_lock);
 	struct thread *curr = thread_current ();
 	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
@@ -267,6 +280,7 @@ write (int fd, const void *buffer, unsigned size) {
 	// validate start and end of pointer are valid
 	validate_ptr (buffer);
 	validate_ptr (buffer + size - 1);
+	if (!init_fds ()) return -1;
 	lock_acquire (&fs_lock);
 	struct thread *curr = thread_current ();
 	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
@@ -308,6 +322,7 @@ tell (int fd) {
 void 
 close (int fd) {
 	lock_acquire (&fs_lock);
+	struct thread *curr = thread_current ();
 	close_without_fs_lock (fd);
 	lock_release (&fs_lock);
 }
@@ -323,6 +338,7 @@ dup2(int oldfd, int newfd) {
 	// atomic operation, i.e. single lock acquire
 
 	lock_acquire (&fs_lock);
+	struct thread *curr = thread_current ();
 	int resfd = newfd;
 	struct fdt_entry *old_fdt_entry = get_fdt_entry_by_fd (oldfd);
 	struct fdt_entry *new_fdt_entry = get_fdt_entry_by_fd (newfd);

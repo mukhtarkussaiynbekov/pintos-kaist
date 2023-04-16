@@ -20,8 +20,8 @@ bool fdt_entry_fd_less (const struct list_elem *a_, const struct list_elem *b_,
 }
 
 struct fdt_entry *get_fdt_entry_by_fd (int fd) {
-	if (fd < 0) return NULL;
 	struct list *fdt = &thread_current ()->fdt;
+	if (fd < 0 || list_empty (fdt)) return NULL;
 	struct fdt_entry *cur_fdt_entry;
 	for (struct list_elem *cur = list_begin (fdt); cur != list_end (fdt); cur = list_next (cur)) {
 		cur_fdt_entry = list_entry (cur, struct fdt_entry, elem);

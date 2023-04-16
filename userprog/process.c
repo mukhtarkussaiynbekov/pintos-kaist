@@ -91,17 +91,18 @@ process_fork (const char *name, struct intr_frame *if_) {
 			PRI_DEFAULT, __do_fork, argv);
 	struct status *child_status;
 	struct thread *curr = thread_current ();
-	if (child_tid == TID_ERROR) {
-		return TID_ERROR;
-	} else if (child_tid) {
-		// parent process
+	if (child_tid != TID_ERROR) {
+		// Wait for child to successfully duplicate resources
 		lock_acquire (&curr->children_lock);
 		child_status = get_child_status (child_tid, &curr->children);
 		sema_down (&child_status->fork_sema);
+
 		// Remove child status from children list and free
 		lock_acquire (&child_status->status_lock);
 		if (!child_status->fork_success) {
 			child_tid = TID_ERROR;
+			if (child_status->self)
+				child_status->self->self_status = NULL;
 			list_remove (&child_status->elem);
 			lock_release (&child_status->status_lock);
 			free (child_status);
@@ -188,9 +189,12 @@ __do_fork (void *aux) {
 	struct fdt_entry *cur_fdt_entry;	// parent's fdt entry
 	struct fdt_entry *new_fdt_entry;	// current's fdt entry
 	for (struct list_elem *cur_fdt_elem = list_begin (&parent->fdt); cur_fdt_elem != list_end (&parent->fdt); cur_fdt_elem = list_next (cur_fdt_elem)) {
-		cur_fdt_entry = list_entry (cur_fdt_elem, struct fdt_entry, elem);
 		new_fdt_entry = malloc (sizeof (struct fdt_entry));
+		if (!new_fdt_entry)
+			goto error;
 		list_push_back (&current->fdt, &new_fdt_entry->elem);
+
+		cur_fdt_entry = list_entry (cur_fdt_elem, struct fdt_entry, elem);
 		new_fdt_entry->fd = cur_fdt_entry->fd;
 		if (cur_fdt_entry->file == &parent->stdin)
 			new_fdt_entry->file = &current->stdin;
@@ -221,8 +225,8 @@ __do_fork (void *aux) {
 	if (parent->exec_file) {
 		current->exec_file = file_duplicate (parent->exec_file);
 		if (!current->exec_file) {
-				goto error;
-			}
+			goto error;
+		}
 	}
 
 	process_init ();
@@ -240,10 +244,8 @@ error:
 void 
 set_fork_success (struct thread *t, bool success) {
 	if (t->self_status) {
-		lock_acquire (&t->self_status->status_lock);
 		t->self_status->fork_success = success;
 		sema_up (&t->self_status->fork_sema);
-		lock_release (&t->self_status->status_lock);
 	}
 }
 
