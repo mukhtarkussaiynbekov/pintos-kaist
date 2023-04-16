@@ -73,7 +73,7 @@ initd (void *f_name) {
 
 	process_init ();
 
-	if (process_exec (f_name, NULL) < 0)
+	if (process_exec (f_name, false) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
 }
@@ -183,7 +183,6 @@ __do_fork (void *aux) {
 
 	bool dup2_called = false;
 	struct list_elem *temp_fdt_elem;	// parent's fdt entry
-	struct list_elem *next_fdt_elem;	// parent's fdt entry
 	struct list_elem *prev_fdt_elem;	// current's fdt entry
 	struct fdt_entry *temp_fdt_entry;	// parent's fdt entry
 	struct fdt_entry *cur_fdt_entry;	// parent's fdt entry
@@ -219,7 +218,6 @@ __do_fork (void *aux) {
 	}
 	current->stdin = true;
 	current->stdout = true;
-	// current->exec_file = NULL;
 	if (parent->exec_file) {
 		current->exec_file = file_duplicate (parent->exec_file);
 		if (!current->exec_file) {
@@ -252,7 +250,7 @@ set_fork_success (struct thread *t, bool success) {
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
 int
-process_exec (void *f_name, struct intr_frame *syscaller_if) {
+process_exec (void *f_name, bool file_malloced) {
 	char *file_name = f_name;
 	bool success;
 
@@ -265,7 +263,7 @@ process_exec (void *f_name, struct intr_frame *syscaller_if) {
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
 	/* We first kill the current context */
-	if (!syscaller_if)
+	if (!file_malloced)
 		process_cleanup ();
 
 	/* Second, we separate file name and arguments */
@@ -277,10 +275,10 @@ process_exec (void *f_name, struct intr_frame *syscaller_if) {
 	file_title = strtok_r (file_name, " ", &args); // argv[0]
 
 	/* And then load the binary */
-	success = load (file_title, args, !syscaller_if ? &_if : syscaller_if); // args == argv[1~argc-1]
+	success = load (file_title, args, &_if); // args == argv[1~argc-1]
 
 	/* If load failed, quit. */
-	if (syscaller_if)
+	if (file_malloced)
 		free (file_name);
 	else
 		palloc_free_page (file_name);
@@ -288,7 +286,7 @@ process_exec (void *f_name, struct intr_frame *syscaller_if) {
 		return -1;
 
 	/* Start switched process. */
-	do_iret (!syscaller_if ? &_if : syscaller_if);
+	do_iret (&_if);
 	NOT_REACHED ();
 }
 

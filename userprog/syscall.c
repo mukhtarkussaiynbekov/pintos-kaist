@@ -167,7 +167,7 @@ exec (const char *cmd_line, struct intr_frame *if_) {
 	validate_ptr (cmd_line + strlen (cmd_line));
 	char *cmd_copy = malloc (strlen(cmd_line) + 1);
 	memcpy (cmd_copy, cmd_line, strlen(cmd_line) + 1);
-	return process_exec (cmd_copy, if_);
+	return process_exec (cmd_copy, true);
 }
 
 int
@@ -322,43 +322,45 @@ dup2(int oldfd, int newfd) {
 	// both closing newfd and setting to oldfd must be performed in one
 	// atomic operation, i.e. single lock acquire
 
-	int resfd;
 	lock_acquire (&fs_lock);
+	int resfd = newfd;
 	struct fdt_entry *old_fdt_entry = get_fdt_entry_by_fd (oldfd);
+	struct fdt_entry *new_fdt_entry = get_fdt_entry_by_fd (newfd);
 	if (!old_fdt_entry) resfd = -1;
-	else if (oldfd == newfd) resfd = newfd;
-	else {
+	else if (oldfd != newfd) {
 		close_without_fs_lock (newfd);
-		struct fdt_entry *new_fdt_entry = malloc (sizeof (struct fdt_entry));
-		new_fdt_entry->fd = newfd;
-		new_fdt_entry->file = old_fdt_entry->file;
-		list_insert_ordered (&thread_current ()->fdt, &new_fdt_entry->elem, fdt_entry_fd_less, NULL);
-		resfd = newfd;
+		new_fdt_entry = malloc (sizeof (struct fdt_entry));
+		if (new_fdt_entry) {
+			new_fdt_entry->fd = newfd;
+			new_fdt_entry->file = old_fdt_entry->file;
+			list_insert_ordered (&thread_current ()->fdt, &new_fdt_entry->elem, fdt_entry_fd_less, NULL);
+		} else
+			resfd = -1;
 	}
 	lock_release (&fs_lock);
 	return resfd;
 }
 
-void 
+void
 close_without_fs_lock (int fd) {
 	if (fd < 0) return;
 	struct fdt_entry *target_entry = get_fdt_entry_by_fd (fd);
 	if (!target_entry) return;
 	struct thread *current = thread_current ();
-	struct file *dup_file = NULL;
+	bool dup_file = false;
 	struct fdt_entry *cur_entry;
 	if (!(target_entry->file == &current->stdin || target_entry->file == &current->stdout)) {
 		for (struct list_elem *cur_elem = list_begin (&current->fdt); cur_elem != list_end (&current->fdt); cur_elem = list_next (cur_elem)) {
 			cur_entry = list_entry (cur_elem, struct fdt_entry, elem);
 			if (cur_entry == target_entry) continue;
 			if (cur_entry->file == target_entry->file) {
-				if (!dup_file) {
-					dup_file = file_duplicate (target_entry->file);
-					if (!dup_file) exit (-1);
-				}
-				cur_entry->file = dup_file;
+				dup_file = true;
 			}
 		}
+		// duplicate file descriptors point to the same file
+		// close file if no duplicate exists
+		if (!dup_file)
+			file_close (target_entry->file);
 	}
 	list_remove (&target_entry->elem);
 	free (target_entry);
