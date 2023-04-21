@@ -109,13 +109,11 @@ struct thread {
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
 	struct list children;				/* List of children, child_status structs. */
-	struct lock children_lock;			/* Lock used when modifying children list. */
 	struct status *self_status;			/* Status of the thread. */
 	struct list fdt;					/* File Descriptor Table. */
-	struct semaphore load_sema;			/* Semaphore to wait for a file load. */
 	struct file *exec_file;				/* File that is being executed by the current thread. */
-	bool stdin;							/* For dup2, value is not used. */
-	bool stdout;						/* For dup2, value is not used. */
+	bool stdin;							/* For dup2. */
+	bool stdout;						/* For dup2. */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
@@ -135,7 +133,7 @@ struct status
   struct lock status_lock;				/* Avoid race condition of accessing struct. */
   struct semaphore sema_exit;			/* Sema up upon exit. */
   struct list_elem elem;
-  struct semaphore fork_sema;
+  struct semaphore fork_sema;			/* Sema to wait for child to duplicate resources. */
   bool fork_success;
 };
 

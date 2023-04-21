@@ -93,7 +93,6 @@ process_fork (const char *name, struct intr_frame *if_) {
 	struct thread *curr = thread_current ();
 	if (child_tid != TID_ERROR) {
 		// Wait for child to successfully duplicate resources
-		lock_acquire (&curr->children_lock);
 		child_status = get_child_status (child_tid, &curr->children);
 		sema_down (&child_status->fork_sema);
 
@@ -108,7 +107,6 @@ process_fork (const char *name, struct intr_frame *if_) {
 			free (child_status);
 		} else
 			lock_release (&child_status->status_lock);
-		lock_release (&curr->children_lock);
 	}
 	return child_tid;
 }
@@ -306,17 +304,15 @@ int
 process_wait (tid_t child_tid) {
 	struct thread *curr = thread_current ();
 	struct status *child_status = get_child_status (child_tid, &curr->children);
-	if (!child_status) // not direct child
+	if (!child_status) // not direct child or wait has been called previously
 		return -1;
 	sema_down (&child_status->sema_exit);
 
 	// Remove child status from children list and free
-	lock_acquire (&curr->children_lock);
 	lock_acquire (&child_status->status_lock);
 	int exit_status = child_status->exit_status;
 	list_remove (&child_status->elem);
 	lock_release (&child_status->status_lock);
-	lock_release (&curr->children_lock);
 	free (child_status);
 	return exit_status;
 }
@@ -336,7 +332,6 @@ process_exit (void) {
 		}
 	}
 
-	lock_acquire (&curr->children_lock);
 	struct status *child_status;
 	while (!list_empty (&curr->children)) {
 		child_status = list_entry (list_pop_front (&curr->children), struct status, elem);
@@ -346,7 +341,6 @@ process_exit (void) {
 		lock_release (&child_status->status_lock);
 		free (child_status);
 	}
-	lock_release (&curr->children_lock);
 	
 	struct list_elem *temp_fdt_elem;
 	struct list_elem *next_fdt_elem;
@@ -632,7 +626,6 @@ load (const char *file_name, char *args, struct intr_frame *if_) {
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	sema_up (&thread_current ()->load_sema);
 	return success;
 }
 

@@ -141,7 +141,9 @@ page_fault (struct intr_frame *f) {
 	write = (f->error_code & PF_W) != 0;
 	user = (f->error_code & PF_U) != 0;
 	
+#ifdef USERPROG
 	exit (-1);
+#endif
 
 #ifdef VM
 	/* For project 3 and later. */

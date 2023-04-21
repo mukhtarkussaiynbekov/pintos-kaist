@@ -631,9 +631,7 @@ init_thread (struct thread *t, const char *name, int priority) {
 		list_push_back (&ready_with_blocked_list, &t->alive_elem);
 	
 #ifdef USERPROG
-	sema_init (&t->load_sema, 0);
 	list_init (&t->children);
-	lock_init (&t->children_lock);
 	list_init (&t->fdt);
 	t->stdin = false;
 	t->stdout = false;

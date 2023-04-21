@@ -322,7 +322,6 @@ tell (int fd) {
 void 
 close (int fd) {
 	lock_acquire (&fs_lock);
-	struct thread *curr = thread_current ();
 	close_without_fs_lock (fd);
 	lock_release (&fs_lock);
 }
@@ -338,7 +337,6 @@ dup2(int oldfd, int newfd) {
 	// atomic operation, i.e. single lock acquire
 
 	lock_acquire (&fs_lock);
-	struct thread *curr = thread_current ();
 	int resfd = newfd;
 	struct fdt_entry *old_fdt_entry = get_fdt_entry_by_fd (oldfd);
 	struct fdt_entry *new_fdt_entry = get_fdt_entry_by_fd (newfd);
